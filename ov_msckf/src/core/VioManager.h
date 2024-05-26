@@ -136,6 +136,12 @@ public:
     feat_tracks_uvd = active_tracks_uvd;
   }
 
+  // Reset the VIO system. Modification by Mohamed Abdelkader
+  // NOTE: Not tested
+  void reset_vio(void){
+    is_initialized_vio = false;
+  }
+
 protected:
   /**
    * @brief Given a new set of camera images, this will track them.

@@ -41,6 +41,8 @@
 #include <std_msgs/Float64.h>
 #include <tf/transform_broadcaster.h>
 
+#include "std_srvs/Empty.h"
+
 #include <atomic>
 #include <fstream>
 #include <memory>
@@ -152,6 +154,10 @@ protected:
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;
   std::vector<std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>>> sync_subs_cam;
+
+  // Reset service
+  ros::ServiceServer reset_service;
+  bool handle_service(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
 
   // For path viz
   unsigned int poses_seq_imu = 0;

@@ -80,6 +80,9 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
   it_pub_loop_img_depth = it.advertise("loop_depth", 2);
   it_pub_loop_img_depth_color = it.advertise("loop_depth_colored", 2);
 
+  // Reset service
+  reset_service = nh->advertiseService("reset_vio", &ROS1Visualizer::handle_service, this);
+
   // option to enable publishing of global to IMU transformation
   nh->param<bool>("publish_global_to_imu_tf", publish_global2imu_tf, true);
   nh->param<bool>("publish_calibration_tf", publish_calibration_tf, true);
@@ -146,6 +149,26 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
     });
     thread.detach();
   }
+}
+// Reset service
+bool ROS1Visualizer::handle_service(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res) {
+  try
+    {
+        ROS_INFO("Reset service has been called.");
+        _app->reset_vio();
+        // If everything goes well
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        ROS_ERROR("Caught an exception: %s", e.what());
+        return false;
+    }
+    catch (...)
+    {
+        ROS_ERROR("Caught an unknown exception.");
+        return false;
+    }
 }
 
 void ROS1Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> parser) {
