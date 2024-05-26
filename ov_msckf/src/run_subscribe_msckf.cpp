@@ -1,25 +1,5 @@
-/*
- * OpenVINS: An Open Platform for Visual-Inertial Research
- * Copyright (C) 2018-2023 Patrick Geneva
- * Copyright (C) 2018-2023 Guoquan Huang
- * Copyright (C) 2018-2023 OpenVINS Contributors
- * Copyright (C) 2018-2019 Kevin Eckenhoff
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 #include <memory>
+#include <atomic>
 
 #include "core/VioManager.h"
 #include "core/VioManagerOptions.h"
@@ -28,9 +8,11 @@
 #if ROS_AVAILABLE == 1
 #include "ros/ROS1Visualizer.h"
 #include <ros/ros.h>
+#include <std_srvs/Empty.h>
 #elif ROS_AVAILABLE == 2
 #include "ros/ROS2Visualizer.h"
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/empty.hpp>
 #endif
 
 using namespace ov_msckf;
@@ -38,34 +20,17 @@ using namespace ov_msckf;
 std::shared_ptr<VioManager> sys;
 #if ROS_AVAILABLE == 1
 std::shared_ptr<ROS1Visualizer> viz;
+std::shared_ptr<ros::NodeHandle> nh;
+ros::ServiceServer reset_service;
 #elif ROS_AVAILABLE == 2
 std::shared_ptr<ROS2Visualizer> viz;
+std::shared_ptr<rclcpp::Node> node;
+rclcpp::Service<std_srvs::srv::Empty>::SharedPtr reset_service;
 #endif
 
-// Main function
-int main(int argc, char **argv) {
+std::atomic<bool> reset_requested(false);
 
-  // Ensure we have a path, if the user passes it then we should use it
-  std::string config_path = "unset_path_to_config.yaml";
-  if (argc > 1) {
-    config_path = argv[1];
-  }
-
-#if ROS_AVAILABLE == 1
-  // Launch our ros node
-  ros::init(argc, argv, "run_subscribe_msckf");
-  auto nh = std::make_shared<ros::NodeHandle>("~");
-  nh->param<std::string>("config_path", config_path, config_path);
-#elif ROS_AVAILABLE == 2
-  // Launch our ros node
-  rclcpp::init(argc, argv);
-  rclcpp::NodeOptions options;
-  options.allow_undeclared_parameters(true);
-  options.automatically_declare_parameters_from_overrides(true);
-  auto node = std::make_shared<rclcpp::Node>("run_subscribe_msckf", options);
-  node->get_parameter<std::string>("config_path", config_path);
-#endif
-
+void start_vio_system(const std::string& config_path) {
   // Load the config
   auto parser = std::make_shared<ov_core::YamlParser>(config_path);
 #if ROS_AVAILABLE == 1
@@ -97,19 +62,80 @@ int main(int argc, char **argv) {
     PRINT_ERROR(RED "unable to parse all parameters, please fix\n" RESET);
     std::exit(EXIT_FAILURE);
   }
+}
+
+#if ROS_AVAILABLE == 1
+bool reset_callback(std_srvs::Empty::Request& req, std_srvs::Empty::Response& res) {
+#elif ROS_AVAILABLE == 2
+void reset_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> req, std::shared_ptr<std_srvs::srv::Empty::Response> res) {
+#endif
+  reset_requested.store(true);
+#if ROS_AVAILABLE == 1
+  return true;
+#elif ROS_AVAILABLE == 2
+  res->success = true;
+#endif
+}
+
+int main(int argc, char **argv) {
+
+  // Ensure we have a path, if the user passes it then we should use it
+  std::string config_path = "unset_path_to_config.yaml";
+  if (argc > 1) {
+    config_path = argv[1];
+  }
+
+#if ROS_AVAILABLE == 1
+  // Launch our ros node
+  ros::init(argc, argv, "run_subscribe_msckf");
+  nh = std::make_shared<ros::NodeHandle>("~");
+  nh->param<std::string>("config_path", config_path, config_path);
+  // Start VIO system
+  start_vio_system(config_path);
+  // Create reset service
+  reset_service = nh->advertiseService("reset_vio", reset_callback);
+#elif ROS_AVAILABLE == 2
+  // Launch our ros node
+  rclcpp::init(argc, argv);
+  rclcpp::NodeOptions options;
+  options.allow_undeclared_parameters(true);
+  options.automatically_declare_parameters_from_overrides(true);
+  node = std::make_shared<rclcpp::Node>("run_subscribe_msckf", options);
+  node->get_parameter<std::string>("config_path", config_path);
+  // Start VIO system
+  start_vio_system(config_path);
+  // Create reset service
+  reset_service = node->create_service<std_srvs::srv::Empty>("reset_vio", reset_callback);
+#endif
 
   // Spin off to ROS
   PRINT_DEBUG("done...spinning to ros\n");
 #if ROS_AVAILABLE == 1
-  // ros::spin();
   ros::AsyncSpinner spinner(0);
   spinner.start();
+
+  while (ros::ok()) {
+    if (reset_requested.load()) {
+      PRINT_DEBUG("Resetting VIO system...\n");
+      start_vio_system(config_path);
+      reset_requested.store(false);
+    }
+    ros::Duration(0.1).sleep();
+  }
   ros::waitForShutdown();
 #elif ROS_AVAILABLE == 2
-  // rclcpp::spin(node);
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node);
-  executor.spin();
+
+  while (rclcpp::ok()) {
+    if (reset_requested.load()) {
+      PRINT_DEBUG("Resetting VIO system...\n");
+      start_vio_system(config_path);
+      reset_requested.store(false);
+    }
+    executor.spin_some();
+    rclcpp::sleep_for(std::chrono::milliseconds(100));
+  }
 #endif
 
   // Final visualization
