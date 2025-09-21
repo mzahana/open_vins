@@ -438,6 +438,29 @@ struct VioManagerOptions {
   /// KNN ration between top two descriptor matcher which is required to be a good match
   double knn_ratio = 0.85;
 
+  // LOOP CLOSURE ============================
+
+  /// If we should perform loop closure detection
+  bool loop_closure_enabled = false;
+
+  /// Path to the vocabulary file for bag-of-words loop detection
+  std::string loop_vocabulary_path = "";
+
+  /// Frequency of loop closure detection (Hz)
+  double loop_detection_frequency = 1.0;
+
+  /// Maximum number of keyframes to store for loop closure
+  int loop_max_keyframes = 500;
+
+  /// Bag-of-words similarity threshold for loop detection
+  double loop_bow_threshold = 0.01;
+
+  /// Minimum geometric verification inliers for loop closure
+  int loop_geometric_threshold = 30;
+
+  /// Minimum temporal separation for loop closure (seconds)
+  double loop_min_separation = 30.0;
+
   /// Frequency we want to track images at (higher freq ones will be dropped)
   double track_frequency = 20.0;
 
@@ -482,6 +505,15 @@ struct VioManagerOptions {
       }
       parser->parse_config("knn_ratio", knn_ratio);
       parser->parse_config("track_frequency", track_frequency);
+
+      // Loop closure parameters
+      parser->parse_config("loop_closure_enabled", loop_closure_enabled);
+      parser->parse_config("loop_vocabulary_path", loop_vocabulary_path);
+      parser->parse_config("loop_detection_frequency", loop_detection_frequency);
+      parser->parse_config("loop_max_keyframes", loop_max_keyframes);
+      parser->parse_config("loop_bow_threshold", loop_bow_threshold);
+      parser->parse_config("loop_geometric_threshold", loop_geometric_threshold);
+      parser->parse_config("loop_min_separation", loop_min_separation);
     }
     PRINT_DEBUG("FEATURE TRACKING PARAMETERS:\n");
     PRINT_DEBUG("  - use_stereo: %d\n", use_stereo);
@@ -499,6 +531,14 @@ struct VioManagerOptions {
     PRINT_DEBUG("  - hist method: %d\n", (int)histogram_method);
     PRINT_DEBUG("  - knn ratio: %.3f\n", knn_ratio);
     PRINT_DEBUG("  - track frequency: %.1f\n", track_frequency);
+    PRINT_DEBUG("LOOP CLOSURE PARAMETERS:\n");
+    PRINT_DEBUG("  - loop closure enabled: %d\n", loop_closure_enabled);
+    PRINT_DEBUG("  - vocabulary path: %s\n", loop_vocabulary_path.c_str());
+    PRINT_DEBUG("  - detection frequency: %.1f\n", loop_detection_frequency);
+    PRINT_DEBUG("  - max keyframes: %d\n", loop_max_keyframes);
+    PRINT_DEBUG("  - bow threshold: %.4f\n", loop_bow_threshold);
+    PRINT_DEBUG("  - geometric threshold: %d\n", loop_geometric_threshold);
+    PRINT_DEBUG("  - min separation: %.1f\n", loop_min_separation);
     featinit_options.print(parser);
   }
 

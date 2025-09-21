@@ -42,6 +42,11 @@
 #include "update/UpdaterMSCKF.h"
 #include "update/UpdaterSLAM.h"
 #include "update/UpdaterZeroVelocity.h"
+#include "update/UpdaterLoop.h"
+
+#include "loop/LoopDetector.h"
+#include "loop/BriefExtractor.h"
+#include "state/LoopTypes.h"
 
 using namespace ov_core;
 using namespace ov_type;
@@ -160,6 +165,35 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
     updaterZUPT = std::make_shared<UpdaterZeroVelocity>(params.zupt_options, params.imu_noises, trackFEATS->get_feature_database(),
                                                         propagator, params.gravity_mag, params.zupt_max_velocity,
                                                         params.zupt_noise_multiplier, params.zupt_max_disparity);
+  }
+
+  // Initialize loop closure components if enabled
+  if (params.loop_closure_enabled) {
+    // Create loop closure updater
+    updaterLOOP = std::make_shared<UpdaterLoop>(params.msckf_options);
+
+    // Create BRIEF descriptor extractor
+    brief_extractor = std::make_shared<BriefExtractor>();
+
+    // Create loop detector with options
+    LoopDetectorOptions loop_options;
+    loop_options.vocabulary_path = params.loop_vocabulary_path;
+    loop_options.detection_frequency = params.loop_detection_frequency;
+    loop_options.max_keyframes_memory = params.loop_max_keyframes;
+    loop_options.bow_similarity_threshold = params.loop_bow_threshold;
+    loop_options.min_loop_separation = params.loop_min_separation;
+
+    loop_detector = std::make_shared<LoopDetector>(loop_options);
+
+    // Initialize the loop detector
+    if (loop_detector->initialize()) {
+      PRINT_INFO("[VIO]: Loop closure detection initialized successfully\n");
+    } else {
+      PRINT_ERROR("[VIO]: Failed to initialize loop closure detection\n");
+      loop_detector = nullptr;
+      updaterLOOP = nullptr;
+      brief_extractor = nullptr;
+    }
   }
 }
 
@@ -318,6 +352,11 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
 
   // Call on our propagate and update function
   do_feature_propagate_update(message);
+
+  // Process loop closure if enabled
+  if (is_initialized_vio && loop_detector != nullptr) {
+    process_loop_closure(message);
+  }
 }
 
 void VioManager::do_feature_propagate_update(const ov_core::CameraData &message) {
@@ -711,4 +750,157 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
                state->_calib_imu_tg->value()(4), state->_calib_imu_tg->value()(5), state->_calib_imu_tg->value()(6),
                state->_calib_imu_tg->value()(7), state->_calib_imu_tg->value()(8));
   }
+}
+
+//===============================================================================
+// LOOP CLOSURE IMPLEMENTATION
+//===============================================================================
+
+void VioManager::process_loop_closure(const ov_core::CameraData &message) {
+  if (!loop_detector || !brief_extractor || !updaterLOOP) {
+    PRINT_DEBUG("[LOOP]: Loop closure components not initialized (detector=%p, extractor=%p, updater=%p)\n",
+                loop_detector.get(), brief_extractor.get(), updaterLOOP.get());
+    return;
+  }
+
+  PRINT_DEBUG("[LOOP]: Processing loop closure at time %.3f\n", message.timestamp);
+
+  // Check if enough time has passed since last loop detection
+  const double detection_period = 1.0 / params.loop_detection_frequency;
+  if (last_loop_detection_time > 0 &&
+      (message.timestamp - last_loop_detection_time) < detection_period) {
+    PRINT_DEBUG("[LOOP]: Skipping - not enough time passed (%.3f < %.3f)\n",
+                message.timestamp - last_loop_detection_time, detection_period);
+    return;
+  }
+
+  // Get current pose for keyframe selection
+  Eigen::Matrix4d current_pose = Eigen::Matrix4d::Identity();
+  if (!state->_clones_IMU.empty()) {
+    auto pose_imu = state->_clones_IMU.rbegin()->second;
+    current_pose.block<3, 3>(0, 0) = pose_imu->Rot();
+    current_pose.block<3, 1>(0, 3) = pose_imu->pos();
+  }
+
+  // Check if we should select this frame as keyframe
+  if (!should_select_keyframe(message.timestamp, current_pose)) {
+    PRINT_DEBUG("[LOOP]: Skipping - keyframe selection criteria not met\n");
+    return;
+  }
+
+  PRINT_DEBUG("[LOOP]: Selecting keyframe at time %.3f\n", message.timestamp);
+
+  // Extract BRIEF descriptors from current image
+  std::vector<cv::KeyPoint> keypoints;
+  std::vector<BriefDescriptor> descriptors;
+
+  // Use first camera for loop detection
+  if (!message.images.empty()) {
+    PRINT_DEBUG("[LOOP]: Image available: %dx%d, type: %d\n",
+                message.images[0].cols, message.images[0].rows, message.images[0].type());
+
+    // Extract FAST features
+    cv::FAST(message.images[0], keypoints, 30, true);
+    PRINT_DEBUG("[LOOP]: FAST extraction: %zu keypoints\n", keypoints.size());
+
+    // Extract BRIEF descriptors
+    if (brief_extractor == nullptr) {
+      PRINT_ERROR("[LOOP]: BRIEF extractor is null!\n");
+    } else {
+      PRINT_DEBUG("[LOOP]: BRIEF extractor available, extracting descriptors\n");
+      brief_extractor->extract(message.images[0], keypoints, descriptors);
+      PRINT_DEBUG("[LOOP]: BRIEF extraction: %zu keypoints -> %zu descriptors\n",
+                  keypoints.size(), descriptors.size());
+    }
+
+    PRINT_DEBUG("[LOOP]: Final validation - keypoints empty: %s, descriptors empty: %s\n",
+                keypoints.empty() ? "true" : "false", descriptors.empty() ? "true" : "false");
+
+    if (!keypoints.empty() && !descriptors.empty()) {
+      PRINT_DEBUG("[LOOP]: Extracted %zu keypoints and %zu descriptors\n", keypoints.size(), descriptors.size());
+
+      // Add keyframe to loop detector
+      PRINT_DEBUG("[LOOP]: About to call loop_detector->addKeyframe()\n");
+      bool addKeyframe_result = loop_detector->addKeyframe(message.timestamp, keypoints, descriptors, current_pose);
+      PRINT_DEBUG("[LOOP]: addKeyframe() returned: %s\n", addKeyframe_result ? "true" : "false");
+
+      // Create keyframe info for state
+      KeyframeInfo keyframe_info(message.timestamp, keypoints, cv::Mat(), std::vector<size_t>());
+
+      // Add keyframe to state
+      if (!state->_clones_IMU.empty()) {
+        auto pose_clone = state->_clones_IMU.rbegin()->second;
+        state->addLoopKeyframe(message.timestamp, pose_clone, keyframe_info);
+      }
+
+      // Detect loop closures
+      std::vector<LoopCandidate> candidates;
+      int num_candidates = loop_detector->detectLoops(message.timestamp, candidates);
+
+      PRINT_DEBUG("[LOOP]: Loop detection returned %d candidates\n", num_candidates);
+
+      if (num_candidates > 0) {
+        PRINT_INFO("[LOOP]: Detected %d loop closure candidates\n", num_candidates);
+
+        // Convert candidates to constraints
+        std::vector<LoopConstraint> constraints;
+        int constraint_id = 0;
+
+        for (const auto& candidate : candidates) {
+          if (candidate.is_verified && candidate.confidence > 0.5) {
+            LoopConstraint constraint;
+            constraint.constraint_id = constraint_id++;
+            constraint.timestamp1 = message.timestamp;
+            constraint.timestamp2 = candidate.match_keyframe_id; // Note: this needs proper timestamp mapping
+            constraint.relative_pose = candidate.relative_pose;
+            constraint.confidence = candidate.confidence;
+
+            // Set information matrix based on confidence
+            constraint.information_matrix = Eigen::Matrix<double, 6, 6>::Identity() * constraint.confidence * 100.0;
+
+            constraints.push_back(constraint);
+            state->addLoopConstraint(constraint);
+          }
+        }
+
+        // Process constraints with EKF update
+        if (!constraints.empty()) {
+          int processed = updaterLOOP->update(state, constraints);
+          if (processed > 0) {
+            num_loop_closures += processed;
+            PRINT_INFO("[LOOP]: Successfully processed %d loop constraints\n", processed);
+          }
+        }
+      }
+
+      // Update keyframe selection state
+      last_keyframe_timestamp = message.timestamp;
+      last_keyframe_pose = current_pose;
+    }
+  }
+
+  last_loop_detection_time = message.timestamp;
+}
+
+bool VioManager::should_select_keyframe(double timestamp, const Eigen::Matrix4d& pose) {
+  if (last_keyframe_timestamp < 0) {
+    return true; // First keyframe
+  }
+
+  // Check temporal separation
+  const double min_time_separation = 1.0; // 1 second minimum
+  if (timestamp - last_keyframe_timestamp < min_time_separation) {
+    return false;
+  }
+
+  // Use keyframe selection criteria
+  return keyframe_criteria.shouldSelectKeyframe(last_keyframe_pose, pose, 0, 100);
+}
+
+bool VioManager::is_loop_closure_enabled() const {
+  return loop_detector != nullptr;
+}
+
+int VioManager::get_num_loop_closures() const {
+  return num_loop_closures;
 }

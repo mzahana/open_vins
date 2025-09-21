@@ -33,6 +33,40 @@
 
 #include "VioManagerOptions.h"
 
+// Forward declarations for loop closure
+namespace ov_msckf {
+  class LoopDetector;
+  class BriefExtractor;
+
+  // Simple keyframe selection criteria (avoiding header dependencies)
+  struct KeyframeSelectionCriteria {
+    double min_translation_distance = 0.3;   // Minimum translation distance (meters)
+    double min_rotation_angle = 0.2;         // Minimum rotation angle (radians)
+
+    bool shouldSelectKeyframe(const Eigen::Matrix4d& last_pose,
+                             const Eigen::Matrix4d& current_pose,
+                             int num_tracked_features,
+                             int total_features) const {
+      // Check translation distance
+      Eigen::Vector3d translation_diff = current_pose.block<3, 1>(0, 3) - last_pose.block<3, 1>(0, 3);
+      double translation_distance = translation_diff.norm();
+
+      if (translation_distance > min_translation_distance) {
+        return true;
+      }
+
+      // Check rotation angle
+      Eigen::Matrix3d R_last = last_pose.block<3, 3>(0, 0);
+      Eigen::Matrix3d R_current = current_pose.block<3, 3>(0, 0);
+      Eigen::Matrix3d R_diff = R_current * R_last.transpose();
+
+      double rotation_angle = std::acos(std::max(-1.0, std::min(1.0, (R_diff.trace() - 1.0) / 2.0)));
+
+      return rotation_angle > min_rotation_angle;
+    }
+  };
+}
+
 namespace ov_core {
 struct ImuData;
 struct CameraData;
@@ -50,6 +84,7 @@ class StateHelper;
 class UpdaterMSCKF;
 class UpdaterSLAM;
 class UpdaterZeroVelocity;
+class UpdaterLoop;
 class Propagator;
 
 /**
@@ -116,6 +151,12 @@ public:
   /// Returns 3d SLAM features in the global frame
   std::vector<Eigen::Vector3d> get_features_SLAM();
 
+  /// Get loop closure detection status
+  bool is_loop_closure_enabled() const;
+
+  /// Get number of loop closures detected
+  int get_num_loop_closures() const;
+
   /// Returns 3d ARUCO features in the global frame
   std::vector<Eigen::Vector3d> get_features_ARUCO();
 
@@ -176,6 +217,20 @@ protected:
    */
   void retriangulate_active_tracks(const ov_core::CameraData &message);
 
+  /**
+   * @brief Perform loop closure detection and update
+   * @param message Contains our timestamp, images, and camera ids
+   */
+  void process_loop_closure(const ov_core::CameraData &message);
+
+  /**
+   * @brief Check if current frame should be selected as keyframe
+   * @param timestamp Current timestamp
+   * @param pose Current camera pose
+   * @return true if frame should be keyframe
+   */
+  bool should_select_keyframe(double timestamp, const Eigen::Matrix4d& pose);
+
   /// Manager parameters
   VioManagerOptions params;
 
@@ -205,6 +260,9 @@ protected:
 
   /// Our zero velocity tracker
   std::shared_ptr<UpdaterZeroVelocity> updaterZUPT;
+
+  /// Our loop closure updater
+  std::shared_ptr<UpdaterLoop> updaterLOOP;
 
   /// This is the queue of measurement times that have come in since we starting doing initialization
   /// After we initialize, we will want to prop & update to the latest timestamp quickly
@@ -241,6 +299,31 @@ protected:
   std::map<size_t, Eigen::Matrix3d> active_feat_linsys_A;
   std::map<size_t, Eigen::Vector3d> active_feat_linsys_b;
   std::map<size_t, int> active_feat_linsys_count;
+
+  //===============================================================================
+  // LOOP CLOSURE VARIABLES
+  //===============================================================================
+
+  /// Loop detector instance
+  std::shared_ptr<ov_msckf::LoopDetector> loop_detector;
+
+  /// Brief descriptor extractor for loop closure
+  std::shared_ptr<ov_msckf::BriefExtractor> brief_extractor;
+
+  /// Last keyframe timestamp for keyframe selection
+  double last_keyframe_timestamp = -1;
+
+  /// Last keyframe pose for keyframe selection
+  Eigen::Matrix4d last_keyframe_pose = Eigen::Matrix4d::Identity();
+
+  /// Keyframe selection criteria
+  ov_msckf::KeyframeSelectionCriteria keyframe_criteria;
+
+  /// Number of loop closures detected
+  int num_loop_closures = 0;
+
+  /// Loop closure processing frequency control
+  double last_loop_detection_time = -1;
 };
 
 } // namespace ov_msckf

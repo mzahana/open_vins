@@ -21,7 +21,7 @@ details on what the system supports.
 
 ## News / Events
 
-* **(by Mohamed Abdelkader - September 2024** - Updated for ROS 2 Jazzy compatibility and modern Ceres Solver (v2.2+). Fixed header file extensions (.h → .hpp) for ROS 2 packages and migrated from deprecated `LocalParameterization` to new `Manifold` API in Ceres Solver. All core packages now build successfully on Ubuntu 24.04 with ROS 2 Jazzy.
+* **by Mohamed Abdelkader - September 2024** - Updated for ROS 2 Jazzy compatibility and modern Ceres Solver (v2.2+). Fixed header file extensions (.h → .hpp) for ROS 2 packages and migrated from deprecated `LocalParameterization` to new `Manifold` API in Ceres Solver. All core packages now build successfully on Ubuntu 24.04 with ROS 2 Jazzy.
 * **May 11, 2023** - Inertial intrinsic support released as part of v2.7 along with a few bug fixes and improvements to stereo KLT tracking. Please check out the [release page](https://github.com/rpng/open_vins/releases/tag/v2.7) for details.
 * **April 15, 2023** - Minor update to v2.6.3 to support incremental feature triangulation of active features for downstream applications, faster zero-velocity update, small bug fixes, some example realsense configurations, and cached fast state prediction. Please check out the [release page](https://github.com/rpng/open_vins/releases/tag/v2.6.3) for details.
 * **April 3, 2023** - We have released a monocular plane-aided VINS, termed [ov_plane](https://github.com/rpng/ov_plane), which leverages the OpenVINS project. Both now support the released [Indoor AR Table](https://github.com/rpng/ar_table_dataset) dataset.

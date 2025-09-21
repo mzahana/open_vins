@@ -4,8 +4,8 @@ verbosity: "INFO" # ALL, DEBUG, INFO, WARNING, ERROR, SILENT
 
 use_fej: true # if first-estimate Jacobians should be used (enable for good consistency)
 integration: "rk4" # discrete, rk4, analytical (if rk4 or analytical used then analytical covariance propagation is used)
-use_stereo: true # if we have more than 1 camera, if we should try to track stereo constraints between pairs
-max_cameras: 2 # how many cameras we have 1 = mono, 2 = stereo, >2 = binocular (all mono tracking)
+use_stereo: false # if we have more than 1 camera, if we should try to track stereo constraints between pairs
+max_cameras: 1 # how many cameras we have 1 = mono, 2 = stereo, >2 = binocular (all mono tracking)
 
 calib_cam_extrinsics: false
 calib_cam_intrinsics: true
@@ -111,3 +111,38 @@ use_mask: false
 # imu config should also have the correct noise values
 relative_config_imu: "kalibr_imu_chain.yaml"
 relative_config_imucam: "kalibr_imucam_chain.yaml"
+
+
+
+
+# ==================================================================
+# LOOP CLOSURE PARAMETERS
+# ==================================================================
+
+# enable loop closure detection
+loop_closure_enabled: false
+
+# path to vocabulary file for bag-of-words loop detection
+# NOTE: Update this path to your vocabulary file location
+# loop_vocabulary_path: "/path/to/brief_vocab.bin"
+loop_vocabulary_path: ""
+
+# loop closure detection frequency (Hz)
+# Higher frequency for better detection during bag playback
+loop_detection_frequency: 1.0
+
+# maximum number of keyframes to store for loop closure
+# Higher values provide more loop opportunities but use more memory
+loop_max_keyframes: 200
+
+# bag-of-words similarity threshold for initial loop detection
+# Very permissive threshold for testing
+loop_bow_threshold: 0.1
+
+# minimum number of geometric verification inliers required for loop closure
+# Very low threshold for testing
+loop_geometric_threshold: 5
+
+# minimum temporal separation (in seconds) required between loop closures
+# Very low threshold for testing - allows loops to be detected more frequently
+loop_min_separation: 2.0

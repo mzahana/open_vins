@@ -164,3 +164,86 @@ State::State(StateOptions &options) {
     }
   }
 }
+
+//===============================================================================
+// LOOP CLOSURE IMPLEMENTATION
+//===============================================================================
+
+void State::addLoopKeyframe(double timestamp, std::shared_ptr<ov_type::PoseJPL> pose_clone, const KeyframeInfo& keyframe_info) {
+  std::lock_guard<std::mutex> lock(_mutex_state);
+
+  // Add keyframe pose
+  _keyframes_LOOP[timestamp] = pose_clone;
+
+  // Add keyframe info
+  _keyframe_info[timestamp] = keyframe_info;
+
+  // Clean up old keyframes if we exceed the limit
+  if (_keyframes_LOOP.size() > static_cast<size_t>(_max_loop_keyframes)) {
+    cleanupOldKeyframes();
+  }
+}
+
+void State::cleanupOldKeyframes() {
+  // Remove oldest keyframes to maintain memory limit
+  const size_t target_size = static_cast<size_t>(_max_loop_keyframes * 0.8); // Keep 80% when cleaning up
+
+  if (_keyframes_LOOP.size() <= target_size) {
+    return;
+  }
+
+  // Get timestamps to remove (oldest first)
+  std::vector<double> timestamps_to_remove;
+  auto it = _keyframes_LOOP.begin();
+  size_t num_to_remove = _keyframes_LOOP.size() - target_size;
+
+  for (size_t i = 0; i < num_to_remove && it != _keyframes_LOOP.end(); ++i, ++it) {
+    timestamps_to_remove.push_back(it->first);
+  }
+
+  // Remove from both maps
+  for (double timestamp : timestamps_to_remove) {
+    _keyframes_LOOP.erase(timestamp);
+    _keyframe_info.erase(timestamp);
+  }
+}
+
+std::shared_ptr<ov_type::PoseJPL> State::getLoopKeyframePose(double timestamp) {
+  std::lock_guard<std::mutex> lock(_mutex_state);
+
+  auto it = _keyframes_LOOP.find(timestamp);
+  if (it != _keyframes_LOOP.end()) {
+    return it->second;
+  }
+
+  // Try to find closest timestamp within tolerance
+  const double tolerance = 0.1; // 100ms tolerance
+  for (const auto& keyframe_pair : _keyframes_LOOP) {
+    if (std::abs(keyframe_pair.first - timestamp) < tolerance) {
+      return keyframe_pair.second;
+    }
+  }
+
+  return nullptr;
+}
+
+void State::addLoopConstraint(const LoopConstraint& constraint) {
+  std::lock_guard<std::mutex> lock(_mutex_state);
+  _loop_constraints.push_back(constraint);
+}
+
+void State::removeLoopConstraints(const std::vector<int>& constraint_ids) {
+  std::lock_guard<std::mutex> lock(_mutex_state);
+
+  if (constraint_ids.empty()) {
+    return;
+  }
+
+  // Remove constraints with matching IDs
+  auto new_end = std::remove_if(_loop_constraints.begin(), _loop_constraints.end(),
+    [&constraint_ids](const LoopConstraint& constraint) {
+      return std::find(constraint_ids.begin(), constraint_ids.end(), constraint.constraint_id) != constraint_ids.end();
+    });
+
+  _loop_constraints.erase(new_end, _loop_constraints.end());
+}
