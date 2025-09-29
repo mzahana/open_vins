@@ -47,6 +47,9 @@
     <depend condition="$ROS_VERSION == 2">nav_msgs</depend>
     <depend condition="$ROS_VERSION == 2">cv_bridge</depend>
     <depend condition="$ROS_VERSION == 2">image_transport</depend>
+    <depend condition="$ROS_VERSION == 2">std_srvs</depend>
+    <depend condition="$ROS_VERSION == 2">rosidl_default_generators</depend>
+    <exec_depend condition="$ROS_VERSION == 2">rosidl_default_runtime</exec_depend>
     <depend condition="$ROS_VERSION == 2">ov_core</depend>
     <depend condition="$ROS_VERSION == 2">ov_init</depend>
 
@@ -56,6 +59,8 @@
     <depend>libopencv-contrib-dev</depend>
     <depend>boost</depend>
     <depend>libceres-dev</depend>
+
+    <member_of_group>rosidl_interface_packages</member_of_group>
 
     <!-- Note the export is required to expose the executables -->
     <export>

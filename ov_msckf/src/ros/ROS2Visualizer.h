@@ -44,6 +44,8 @@
 #include <tf2/transform_datatypes.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_broadcaster.hpp>
+#include <std_srvs/srv/trigger.hpp>
+#include "ov_msckf/srv/set_filter_state.hpp"
 
 #include <atomic>
 #include <fstream>
@@ -119,6 +121,14 @@ public:
   void callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1, int cam_id0,
                        int cam_id1);
 
+  /// Service callback for reset filter
+  void service_reset_filter(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                           std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+
+  /// Service callback for set filter state
+  void service_set_filter_state(const std::shared_ptr<ov_msckf::srv::SetFilterState::Request> request,
+                               std::shared_ptr<ov_msckf::srv::SetFilterState::Response> response);
+
 protected:
   /// Publish the current state
   void publish_state();
@@ -154,6 +164,10 @@ protected:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud>::SharedPtr pub_loop_point;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr pub_loop_intrinsics;
   std::shared_ptr<tf2_ros::TransformBroadcaster> mTfBr;
+
+  // Service servers
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_filter;
+  rclcpp::Service<ov_msckf::srv::SetFilterState>::SharedPtr srv_set_filter_state;
 
   // Our subscribers and camera synchronizers
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;

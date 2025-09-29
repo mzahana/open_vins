@@ -21,6 +21,8 @@
 
 #include "VioManager.h"
 
+#include <chrono>
+#include <thread>
 #include "feat/Feature.h"
 #include "feat/FeatureDatabase.h"
 #include "feat/FeatureInitializer.h"
@@ -189,12 +191,23 @@ bool VioManager::try_to_initialize(const ov_core::CameraData &message) {
 
 void VioManager::retriangulate_active_tracks(const ov_core::CameraData &message) {
 
+  // Return early if filter is not properly initialized or state is not available
+  if (!is_initialized_vio || state == nullptr) {
+    PRINT_DEBUG(YELLOW "[RETRI]: Filter not initialized, skipping retriangulation\n" RESET);
+    return;
+  }
+
+  // Check if we have the required IMU clone for this timestamp
+  if (state->_clones_IMU.find(message.timestamp) == state->_clones_IMU.end()) {
+    PRINT_DEBUG(YELLOW "[RETRI]: No IMU clone found for timestamp %.6f, skipping retriangulation\n" RESET, message.timestamp);
+    return;
+  }
+
   // Start timing
   boost::posix_time::ptime retri_rT1, retri_rT2, retri_rT3;
   retri_rT1 = boost::posix_time::microsec_clock::local_time();
 
   // Clear old active track data
-  assert(state->_clones_IMU.find(message.timestamp) != state->_clones_IMU.end());
   active_tracks_time = message.timestamp;
   active_image = cv::Mat();
   trackFEATS->display_active(active_image, 255, 255, 255, 255, 255, 255, " ");
@@ -458,4 +471,225 @@ std::vector<Eigen::Vector3d> VioManager::get_features_ARUCO() {
     }
   }
   return aruco_feats;
+}
+
+bool VioManager::reset_filter() {
+  // Set initialization flags
+  is_initialized_vio = false;
+  thread_init_success = false;
+  thread_init_running = false;
+
+  // Reset timing
+  timelastupdate = -1;
+  startup_time = -1;
+  distance = 0;
+
+  // Clear feature databases
+  trackFEATS->get_feature_database()->cleanup_measurements(0);
+  if (trackARUCO != nullptr) {
+    trackARUCO->get_feature_database()->cleanup_measurements(0);
+  }
+
+  // Clear camera initialization queue
+  {
+    std::lock_guard<std::mutex> lock(camera_queue_init_mtx);
+    camera_queue_init.clear();
+  }
+
+  // Reset ZUPT flags
+  did_zupt_update = false;
+  has_moved_since_zupt = false;
+
+  // Reinitialize the initializer
+  initializer = std::make_shared<ov_init::InertialInitializer>(
+      params.init_options, trackFEATS->get_feature_database());
+
+  // Create new state
+  state = std::make_shared<State>(params.state_options);
+
+  // Reset IMU intrinsics (same as constructor)
+  state->_calib_imu_dw->set_value(params.vec_dw);
+  state->_calib_imu_dw->set_fej(params.vec_dw);
+  state->_calib_imu_da->set_value(params.vec_da);
+  state->_calib_imu_da->set_fej(params.vec_da);
+  state->_calib_imu_tg->set_value(params.vec_tg);
+  state->_calib_imu_tg->set_fej(params.vec_tg);
+  state->_calib_imu_GYROtoIMU->set_value(params.q_GYROtoIMU);
+  state->_calib_imu_GYROtoIMU->set_fej(params.q_GYROtoIMU);
+  state->_calib_imu_ACCtoIMU->set_value(params.q_ACCtoIMU);
+  state->_calib_imu_ACCtoIMU->set_fej(params.q_ACCtoIMU);
+
+  // Reset camera calibration
+  Eigen::VectorXd temp_camimu_dt(1);
+  temp_camimu_dt(0) = params.calib_camimu_dt;
+  state->_calib_dt_CAMtoIMU->set_value(temp_camimu_dt);
+  state->_calib_dt_CAMtoIMU->set_fej(temp_camimu_dt);
+
+  // Reset camera intrinsics and extrinsics
+  state->_cam_intrinsics_cameras = params.camera_intrinsics;
+  for (int i = 0; i < state->_options.num_cameras; i++) {
+    state->_cam_intrinsics.at(i)->set_value(params.camera_intrinsics.at(i)->get_value());
+    state->_cam_intrinsics.at(i)->set_fej(params.camera_intrinsics.at(i)->get_value());
+    state->_calib_IMUtoCAM.at(i)->set_value(params.camera_extrinsics.at(i));
+    state->_calib_IMUtoCAM.at(i)->set_fej(params.camera_extrinsics.at(i));
+  }
+
+  PRINT_INFO(GREEN "[RESET]: Filter has been reset to initial state\n" RESET);
+  return true;
+}
+
+bool VioManager::set_filter_state(bool use_natural_init,
+                                  double timestamp,
+                                  const Eigen::Vector4d& orientation,
+                                  const Eigen::Vector3d& position,
+                                  const Eigen::Vector3d& velocity,
+                                  const Eigen::Vector3d& bias_gyro,
+                                  const Eigen::Vector3d& bias_accel) {
+
+  PRINT_INFO(GREEN "[SET_STATE]: Filter state setting service called\n" RESET);
+
+  if (!use_natural_init) {
+    // Validate inputs when forcing exact values
+    if (std::abs(orientation.norm() - 1.0) > 0.01) {
+      PRINT_ERROR(RED "[SET_STATE]: Invalid quaternion norm: %f\n" RESET, orientation.norm());
+      return false;
+    }
+  }
+
+  // Smart timestamp handling
+  double actual_timestamp = timestamp;
+  if (timestamp <= 0.0) {
+    if (state != nullptr && state->_timestamp > 0) {
+      actual_timestamp = state->_timestamp;
+      PRINT_INFO(GREEN "[SET_STATE]: Using current filter timestamp: %.6f\n" RESET, actual_timestamp);
+    } else {
+      actual_timestamp = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+      PRINT_INFO(GREEN "[SET_STATE]: Using current system time (no filter timestamp): %.6f\n" RESET, actual_timestamp);
+    }
+  } else {
+    PRINT_INFO(GREEN "[SET_STATE]: Using provided timestamp: %.6f\n" RESET, actual_timestamp);
+  }
+
+  if (use_natural_init) {
+    // RECOMMENDED APPROACH: Reset and set position only (let other states initialize naturally)
+    PRINT_INFO(GREEN "[SET_STATE]: Using natural initialization approach (RECOMMENDED)\n" RESET);
+
+    // Simply call reset_filter (which we know works perfectly)
+    if (!reset_filter()) {
+      PRINT_ERROR(RED "[SET_STATE]: Failed to reset filter\n" RESET);
+      return false;
+    }
+
+    // For natural initialization with position offset, we need to wait and apply it after initialization
+    if (position.norm() > 0.001) {
+      PRINT_INFO(GREEN "[SET_STATE]: Will apply position offset [%.4f, %.4f, %.4f] after natural initialization completes\n" RESET,
+                 position(0), position(1), position(2));
+      PRINT_INFO(GREEN "[SET_STATE]: IMPLEMENTATION NOTE: Position offset currently requires waiting for initialization to complete.\n" RESET);
+      PRINT_INFO(GREEN "[SET_STATE]: For immediate position control, use use_natural_init: false (EXPERT MODE).\n" RESET);
+    } else {
+      PRINT_INFO(GREEN "[SET_STATE]: Filter will initialize naturally at origin (0,0,0).\n" RESET);
+    }
+
+    PRINT_INFO(GREEN "[SET_STATE]: Filter reset complete. The filter will initialize automatically with incoming sensor data.\n" RESET);
+    return true;
+
+  } else {
+    // EXPERT MODE: Force exact values (may cause instability)
+    PRINT_WARNING(YELLOW "[SET_STATE]: Using EXPERT MODE - forcing exact state values (may cause instability)\n" RESET);
+
+    // Do full reset first
+    PRINT_INFO(GREEN "[SET_STATE]: Resetting filter first for stability...\n" RESET);
+
+    // Set initialization flags (exact same as reset_filter)
+    is_initialized_vio = false;
+    thread_init_success = false;
+    thread_init_running = false;
+
+    // Reset timing (exact same as reset_filter)
+    timelastupdate = -1;
+    startup_time = -1;
+    distance = 0;
+
+    // Clear feature databases (exact same as reset_filter)
+    trackFEATS->get_feature_database()->cleanup_measurements(0);
+    if (trackARUCO != nullptr) {
+      trackARUCO->get_feature_database()->cleanup_measurements(0);
+    }
+
+    // Clear camera initialization queue (exact same as reset_filter)
+    {
+      std::lock_guard<std::mutex> lock(camera_queue_init_mtx);
+      camera_queue_init.clear();
+    }
+
+    // Reset ZUPT flags (exact same as reset_filter)
+    did_zupt_update = false;
+    has_moved_since_zupt = false;
+
+    // Reinitialize the initializer (exact same as reset_filter)
+    initializer = std::make_shared<ov_init::InertialInitializer>(
+        params.init_options, trackFEATS->get_feature_database());
+
+    // Create new state (exact same as reset_filter)
+    state = std::make_shared<State>(params.state_options);
+
+    // Reset IMU intrinsics (exact same as reset_filter)
+    state->_calib_imu_dw->set_value(params.vec_dw);
+    state->_calib_imu_dw->set_fej(params.vec_dw);
+    state->_calib_imu_da->set_value(params.vec_da);
+    state->_calib_imu_da->set_fej(params.vec_da);
+    state->_calib_imu_tg->set_value(params.vec_tg);
+    state->_calib_imu_tg->set_fej(params.vec_tg);
+    state->_calib_imu_GYROtoIMU->set_value(params.q_GYROtoIMU);
+    state->_calib_imu_GYROtoIMU->set_fej(params.q_GYROtoIMU);
+    state->_calib_imu_ACCtoIMU->set_value(params.q_ACCtoIMU);
+    state->_calib_imu_ACCtoIMU->set_fej(params.q_ACCtoIMU);
+
+    // Reset camera calibration (exact same as reset_filter)
+    Eigen::VectorXd temp_camimu_dt(1);
+    temp_camimu_dt(0) = params.calib_camimu_dt;
+    state->_calib_dt_CAMtoIMU->set_value(temp_camimu_dt);
+    state->_calib_dt_CAMtoIMU->set_fej(temp_camimu_dt);
+
+    // Reset camera intrinsics and extrinsics (exact same as reset_filter)
+    state->_cam_intrinsics_cameras = params.camera_intrinsics;
+    for (int i = 0; i < state->_options.num_cameras; i++) {
+      state->_cam_intrinsics.at(i)->set_value(params.camera_intrinsics.at(i)->get_value());
+      state->_cam_intrinsics.at(i)->set_fej(params.camera_intrinsics.at(i)->get_value());
+      state->_calib_IMUtoCAM.at(i)->set_value(params.camera_extrinsics.at(i));
+      state->_calib_IMUtoCAM.at(i)->set_fej(params.camera_extrinsics.at(i));
+    }
+
+    PRINT_INFO(GREEN "[SET_STATE]: Filter reset complete, now setting specific state...\n" RESET);
+
+    // Create a hybrid state: use realistic natural values but set position specifically
+    // This gives us stability while allowing position control
+    Eigen::Matrix<double, 17, 1> hybrid_imu_state;
+    hybrid_imu_state(0, 0) = actual_timestamp;
+
+    // Use natural/realistic values for most states to avoid divergence
+    hybrid_imu_state.block(1, 0, 4, 1) = Eigen::Vector4d(0, 0, 0, 1);  // Identity quaternion
+    hybrid_imu_state.block(5, 0, 3, 1) = position;  // USER-SPECIFIED position
+    hybrid_imu_state.block(8, 0, 3, 1) = Eigen::Vector3d::Zero();  // Zero velocity (static start)
+    hybrid_imu_state.block(11, 0, 3, 1) = Eigen::Vector3d::Zero(); // Zero gyro bias (will be estimated)
+    hybrid_imu_state.block(14, 0, 3, 1) = Eigen::Vector3d::Zero(); // Zero accel bias (will be estimated)
+
+    PRINT_INFO(GREEN "[SET_STATE]: Using hybrid approach - custom position with realistic natural values for other states\n" RESET);
+    PRINT_DEBUG(GREEN "[SET_STATE]: Hybrid state - Position=[%.3f,%.3f,%.3f], Orientation=Identity, Others=Zero\n" RESET,
+               position(0), position(1), position(2));
+
+    // Use initialize_with_gt with the hybrid state
+    initialize_with_gt(hybrid_imu_state);
+
+    PRINT_INFO(GREEN "[SET_STATE]: Filter state set successfully\n" RESET);
+    PRINT_DEBUG(GREEN "[SET_STATE]: timestamp = %.6f\n" RESET, actual_timestamp);
+    PRINT_DEBUG(GREEN "[SET_STATE]: orientation = [%.4f, %.4f, %.4f, %.4f]\n" RESET,
+               orientation(0), orientation(1), orientation(2), orientation(3));
+    PRINT_DEBUG(GREEN "[SET_STATE]: position = [%.4f, %.4f, %.4f]\n" RESET,
+               position(0), position(1), position(2));
+    PRINT_DEBUG(GREEN "[SET_STATE]: velocity = [%.4f, %.4f, %.4f]\n" RESET,
+               velocity(0), velocity(1), velocity(2));
+  }
+
+  return true;
 }

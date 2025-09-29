@@ -95,6 +95,31 @@ public:
    */
   void initialize_with_gt(Eigen::Matrix<double, 17, 1> imustate);
 
+  /**
+   * @brief Resets the filter to uninitialized state
+   * @return True if reset was successful
+   */
+  bool reset_filter();
+
+  /**
+   * @brief Sets the filter to a specific state
+   * @param use_natural_init Use natural initialization for orientation/velocity/biases
+   * @param timestamp State timestamp (use 0.0 for current time)
+   * @param orientation Quaternion [x, y, z, w] (ignored if use_natural_init=true)
+   * @param position Position [x, y, z]
+   * @param velocity Velocity [x, y, z] (ignored if use_natural_init=true)
+   * @param bias_gyro Gyroscope bias [x, y, z] (ignored if use_natural_init=true)
+   * @param bias_accel Accelerometer bias [x, y, z] (ignored if use_natural_init=true)
+   * @return True if state setting was successful
+   */
+  bool set_filter_state(bool use_natural_init,
+                        double timestamp,
+                        const Eigen::Vector4d& orientation,
+                        const Eigen::Vector3d& position,
+                        const Eigen::Vector3d& velocity,
+                        const Eigen::Vector3d& bias_gyro,
+                        const Eigen::Vector3d& bias_accel);
+
   /// If we are initialized or not
   bool initialized() { return is_initialized_vio && timelastupdate != -1; }
 

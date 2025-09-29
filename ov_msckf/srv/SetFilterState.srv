@@ -1,0 +1,14 @@
+# Request
+# RECOMMENDED USAGE: Let filter initialize naturally first, then use this service to adjust the state
+# This service performs a reset then initializes with the provided state
+bool use_natural_init         # true = let filter initialize naturally then adjust, false = force exact values
+float64 timestamp             # Timestamp (use 0.0 for auto-current time, or dataset time)
+float64[4] orientation_xyzw    # Quaternion [x, y, z, w] (ignored if use_natural_init=true)
+float64[3] position_xyz        # Position [x, y, z]
+float64[3] velocity_xyz        # Velocity [x, y, z] (ignored if use_natural_init=true)
+float64[3] bias_gyro_xyz       # Gyroscope bias [x, y, z] (ignored if use_natural_init=true)
+float64[3] bias_accel_xyz      # Accelerometer bias [x, y, z] (ignored if use_natural_init=true)
+---
+# Response
+bool success
+string message

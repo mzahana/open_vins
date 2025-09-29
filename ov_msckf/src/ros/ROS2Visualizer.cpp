@@ -147,6 +147,19 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
     }
   }
 
+  // Create service servers
+  srv_reset_filter = node->create_service<std_srvs::srv::Trigger>(
+      "~/reset_filter",
+      std::bind(&ROS2Visualizer::service_reset_filter, this,
+                std::placeholders::_1, std::placeholders::_2));
+  PRINT_DEBUG("Service: %s\n", srv_reset_filter->get_service_name());
+
+  srv_set_filter_state = node->create_service<ov_msckf::srv::SetFilterState>(
+      "~/set_filter_state",
+      std::bind(&ROS2Visualizer::service_set_filter_state, this,
+                std::placeholders::_1, std::placeholders::_2));
+  PRINT_DEBUG("Service: %s\n", srv_set_filter_state->get_service_name());
+
   // Start thread for the image publishing
   if (_app->get_params().use_multi_threading_pubs) {
     std::thread thread([&] {
@@ -995,5 +1008,55 @@ void ROS2Visualizer::publish_loopclosure_information() {
     header.frame_id = "cam0";
     sensor_msgs::msg::Image::SharedPtr exl_msg2 = cv_bridge::CvImage(header, "bgr8", depthmap_viz).toImageMsg();
     it_pub_loop_img_depth_color.publish(exl_msg2);
+  }
+}
+
+void ROS2Visualizer::service_reset_filter(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                         std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+
+  PRINT_INFO("Reset filter service called\n");
+
+  // Call the reset method
+  bool success = _app->reset_filter();
+
+  if (success) {
+    // Also clear the path history
+    poses_imu.clear();
+    PRINT_DEBUG(GREEN "[SERVICE]: Path history cleared\n" RESET);
+  }
+
+  response->success = success;
+  if (success) {
+    response->message = "Filter successfully reset to initial state";
+    PRINT_INFO(GREEN "[SERVICE]: Filter reset successful\n" RESET);
+  } else {
+    response->message = "Filter reset failed";
+    PRINT_ERROR(RED "[SERVICE]: Filter reset failed\n" RESET);
+  }
+}
+
+void ROS2Visualizer::service_set_filter_state(const std::shared_ptr<ov_msckf::srv::SetFilterState::Request> request,
+                                             std::shared_ptr<ov_msckf::srv::SetFilterState::Response> response) {
+
+  PRINT_INFO("Set filter state service called\n");
+
+  // Convert request to Eigen vectors
+  Eigen::Vector4d orientation(request->orientation_xyzw[0], request->orientation_xyzw[1],
+                             request->orientation_xyzw[2], request->orientation_xyzw[3]);
+  Eigen::Vector3d position(request->position_xyz[0], request->position_xyz[1], request->position_xyz[2]);
+  Eigen::Vector3d velocity(request->velocity_xyz[0], request->velocity_xyz[1], request->velocity_xyz[2]);
+  Eigen::Vector3d bias_gyro(request->bias_gyro_xyz[0], request->bias_gyro_xyz[1], request->bias_gyro_xyz[2]);
+  Eigen::Vector3d bias_accel(request->bias_accel_xyz[0], request->bias_accel_xyz[1], request->bias_accel_xyz[2]);
+
+  // Call the set state method
+  bool success = _app->set_filter_state(request->use_natural_init, request->timestamp, orientation, position, velocity, bias_gyro, bias_accel);
+
+  response->success = success;
+  if (success) {
+    response->message = "Filter state set successfully";
+    PRINT_INFO(GREEN "[SERVICE]: Filter state set successful\n" RESET);
+  } else {
+    response->message = "Failed to set filter state";
+    PRINT_ERROR(RED "[SERVICE]: Failed to set filter state\n" RESET);
   }
 }

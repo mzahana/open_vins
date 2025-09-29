@@ -11,6 +11,8 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(ov_core REQUIRED)
 find_package(ov_init REQUIRED)
 
@@ -45,8 +47,18 @@ list(APPEND ament_libraries
         nav_msgs
         cv_bridge
         image_transport
+        std_srvs
         ov_core
         ov_init
+)
+
+##################################################
+# Generate service interfaces
+##################################################
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+        "srv/SetFilterState.srv"
+        DEPENDENCIES builtin_interfaces std_msgs
 )
 
 ##################################################
@@ -71,6 +83,8 @@ file(GLOB_RECURSE LIBRARY_HEADERS "src/*.h")
 add_library(ov_msckf_lib SHARED ${LIBRARY_SOURCES} ${LIBRARY_HEADERS})
 ament_target_dependencies(ov_msckf_lib ${ament_libraries})
 target_link_libraries(ov_msckf_lib ${thirdparty_libraries})
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
+target_link_libraries(ov_msckf_lib "${cpp_typesupport_target}")
 target_include_directories(ov_msckf_lib PUBLIC src/)
 install(TARGETS ov_msckf_lib
         LIBRARY DESTINATION lib
