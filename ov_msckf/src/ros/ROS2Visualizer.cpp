@@ -77,6 +77,7 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
   pub_loop_point = node->create_publisher<sensor_msgs::msg::PointCloud>("loop_feats", 2);
   pub_loop_extrinsic = node->create_publisher<nav_msgs::msg::Odometry>("loop_extrinsic", 2);
   pub_loop_intrinsics = node->create_publisher<sensor_msgs::msg::CameraInfo>("loop_intrinsics", 2);
+  pub_loop_constraints = node->create_publisher<visualization_msgs::msg::MarkerArray>("loop_constraints", 2);
   it_pub_loop_img_depth = it.advertise("loop_depth", 2);
   it_pub_loop_img_depth_color = it.advertise("loop_depth_colored", 2);
 
@@ -216,6 +217,11 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
       PRINT_INFO("subscribing to cam (mono): %s\n", cam_topic.c_str());
     }
   }
+
+  // Create loop constraint subscriber
+  sub_loop_constraint = _node->create_subscription<ov_loop_closure::msg::LoopConstraint>(
+      "/loop_constraints", 100, std::bind(&ROS2Visualizer::loop_constraint_callback, this, std::placeholders::_1));
+  PRINT_INFO("subscribing to loop constraints: /loop_constraints\n");
 }
 
 void ROS2Visualizer::visualize() {
@@ -254,6 +260,9 @@ void ROS2Visualizer::visualize() {
 
   // Publish keyframe information
   publish_loopclosure_information();
+
+  // Publish loop closure constraints
+  publish_loop_constraints();
 
   // Save total state
   if (save_total_state) {
@@ -492,6 +501,28 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
     thread.join();
   } else {
     thread.detach();
+  }
+}
+
+void ROS2Visualizer::loop_constraint_callback(const ov_loop_closure::msg::LoopConstraint::SharedPtr msg) {
+
+  // Extract timestamps and constraint information
+  double timestamp1 = msg->timestamp1.sec + msg->timestamp1.nanosec * 1e-9;
+  double timestamp2 = msg->timestamp2.sec + msg->timestamp2.nanosec * 1e-9;
+
+  PRINT_INFO("[LOOP_CONSTRAINT] Received loop constraint: t1=%.3f, t2=%.3f, confidence=%.3f\n",
+             timestamp1, timestamp2, msg->confidence_score);
+
+  // Forward the loop constraint to the VioManager for processing
+  if (_app->initialized()) {
+    // For now, just log that we received it. Full implementation will forward to VioManager
+    PRINT_INFO("[LOOP_CONSTRAINT] Forwarding constraint to VioManager (placeholder implementation)\n");
+
+    // Forward the constraint to VioManager
+    _app->apply_loop_constraint(msg);
+
+    // Add for visualization
+    add_loop_constraint(timestamp1, timestamp2);
   }
 }
 
@@ -995,5 +1026,100 @@ void ROS2Visualizer::publish_loopclosure_information() {
     header.frame_id = "cam0";
     sensor_msgs::msg::Image::SharedPtr exl_msg2 = cv_bridge::CvImage(header, "bgr8", depthmap_viz).toImageMsg();
     it_pub_loop_img_depth_color.publish(exl_msg2);
+  }
+}
+
+void ROS2Visualizer::publish_loop_constraints() {
+  // Check if we have subscribers
+  if (pub_loop_constraints->get_subscription_count() == 0) {
+    return;
+  }
+
+  // Get loop constraints with thread safety
+  std::vector<std::pair<double, double>> constraints_copy;
+  {
+    std::lock_guard<std::mutex> lock(loop_constraints_mutex);
+    constraints_copy = loop_constraints;
+  }
+
+  if (constraints_copy.empty()) {
+    return;
+  }
+
+  visualization_msgs::msg::MarkerArray marker_array;
+  marker_array.markers.clear();
+
+  // Create line markers connecting loop closure poses
+  for (size_t i = 0; i < constraints_copy.size(); ++i) {
+    const auto& constraint = constraints_copy[i];
+    double timestamp1 = constraint.first;
+    double timestamp2 = constraint.second;
+
+    // Try to get poses for both timestamps
+    Eigen::Matrix<double, 7, 1> pose1 = Eigen::Matrix<double, 7, 1>::Zero();
+    Eigen::Matrix<double, 7, 1> pose2 = Eigen::Matrix<double, 7, 1>::Zero();
+    bool found_pose1 = false, found_pose2 = false;
+
+    // Check if poses exist in current state
+    if (_app && _app->get_state()) {
+      auto clones = _app->get_state()->_clones_IMU;
+      if (clones.find(timestamp1) != clones.end()) {
+        pose1 = clones.at(timestamp1)->value();
+        found_pose1 = true;
+      }
+      if (clones.find(timestamp2) != clones.end()) {
+        pose2 = clones.at(timestamp2)->value();
+        found_pose2 = true;
+      }
+    }
+
+    if (!found_pose1 || !found_pose2) {
+      continue;
+    }
+
+    // Create line marker
+    visualization_msgs::msg::Marker line_marker;
+    line_marker.header.stamp = _node->now();
+    line_marker.header.frame_id = "global";
+    line_marker.ns = "loop_constraints";
+    line_marker.id = i;
+    line_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    line_marker.action = visualization_msgs::msg::Marker::ADD;
+
+    // Set line properties
+    line_marker.scale.x = 0.02;  // Line width
+    line_marker.color.r = 1.0;   // Red color
+    line_marker.color.g = 0.0;
+    line_marker.color.b = 0.0;
+    line_marker.color.a = 0.8;   // Semi-transparent
+
+    // Add points (pose positions)
+    geometry_msgs::msg::Point p1, p2;
+    p1.x = pose1(4);  // x position
+    p1.y = pose1(5);  // y position
+    p1.z = pose1(6);  // z position
+    p2.x = pose2(4);
+    p2.y = pose2(5);
+    p2.z = pose2(6);
+
+    line_marker.points.push_back(p1);
+    line_marker.points.push_back(p2);
+
+    marker_array.markers.push_back(line_marker);
+  }
+
+  // Publish the markers
+  if (!marker_array.markers.empty()) {
+    pub_loop_constraints->publish(marker_array);
+  }
+}
+
+void ROS2Visualizer::add_loop_constraint(double timestamp1, double timestamp2) {
+  std::lock_guard<std::mutex> lock(loop_constraints_mutex);
+  loop_constraints.emplace_back(timestamp1, timestamp2);
+
+  // Keep only recent constraints (last 100) to prevent unbounded growth
+  if (loop_constraints.size() > 100) {
+    loop_constraints.erase(loop_constraints.begin());
   }
 }

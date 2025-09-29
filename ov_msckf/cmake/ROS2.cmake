@@ -9,10 +9,12 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(ov_core REQUIRED)
 find_package(ov_init REQUIRED)
+find_package(ov_loop_closure REQUIRED)
 
 # Describe ROS project
 option(ENABLE_ROS "Enable or disable building with ROS (if it is found)" ON)
@@ -43,10 +45,12 @@ list(APPEND ament_libraries
         geometry_msgs
         sensor_msgs
         nav_msgs
+        visualization_msgs
         cv_bridge
         image_transport
         ov_core
         ov_init
+        ov_loop_closure
 )
 
 ##################################################
@@ -65,10 +69,6 @@ list(APPEND LIBRARY_SOURCES
         src/update/UpdaterMSCKF.cpp
         src/update/UpdaterSLAM.cpp
         src/update/UpdaterZeroVelocity.cpp
-        src/update/UpdaterLoop.cpp
-        src/loop/BriefExtractor.cpp
-        src/loop/BowDatabase.cpp
-        src/loop/LoopDetector.cpp
 )
 list(APPEND LIBRARY_SOURCES src/ros/ROS2Visualizer.cpp src/ros/ROSVisualizerHelper.cpp)
 file(GLOB_RECURSE LIBRARY_HEADERS "src/*.h")
@@ -112,7 +112,7 @@ ament_target_dependencies(test_sim_repeat ${ament_libraries})
 target_link_libraries(test_sim_repeat ov_msckf_lib ${thirdparty_libraries})
 install(TARGETS test_sim_repeat DESTINATION lib/${PROJECT_NAME})
 
-# Install launch and config directories
+# Install launch, config, and support file directories
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch/)
 install(DIRECTORY ../config/ DESTINATION share/${PROJECT_NAME}/config/)
 
@@ -124,29 +124,7 @@ install(DIRECTORY ../config/ DESTINATION share/${PROJECT_NAME}/config/)
 if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)
 
-    # BRIEF Extractor Tests
-    ament_add_gtest(test_brief_extractor src/test/test_brief_extractor.cpp)
-    ament_target_dependencies(test_brief_extractor ${ament_libraries})
-    target_link_libraries(test_brief_extractor ov_msckf_lib ${thirdparty_libraries})
-    target_include_directories(test_brief_extractor PRIVATE src/)
 
-    # BoW Database Tests
-    ament_add_gtest(test_bow_database src/test/test_bow_database.cpp)
-    ament_target_dependencies(test_bow_database ${ament_libraries})
-    target_link_libraries(test_bow_database ov_msckf_lib ${thirdparty_libraries})
-    target_include_directories(test_bow_database PRIVATE src/)
-
-    # Loop Detector Tests
-    ament_add_gtest(test_loop_detector src/test/test_loop_detector.cpp)
-    ament_target_dependencies(test_loop_detector ${ament_libraries})
-    target_link_libraries(test_loop_detector ov_msckf_lib ${thirdparty_libraries})
-    target_include_directories(test_loop_detector PRIVATE src/)
-
-    # Loop Updater Tests
-    ament_add_gtest(test_updater_loop src/test/test_updater_loop.cpp)
-    ament_target_dependencies(test_updater_loop ${ament_libraries})
-    target_link_libraries(test_updater_loop ov_msckf_lib ${thirdparty_libraries})
-    target_include_directories(test_updater_loop PRIVATE src/)
 endif()
 
 # finally define this as the package

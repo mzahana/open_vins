@@ -36,7 +36,6 @@
 #include "types/Type.h"
 #include "types/Vec.h"
 
-#include "LoopTypes.h"
 
 namespace ov_msckf {
 
@@ -181,59 +180,6 @@ public:
   /// Rotation from accelerometer to the "IMU" gyroscope frame frame (rpng model)
   std::shared_ptr<ov_type::JPLQuat> _calib_imu_ACCtoIMU;
 
-  //===============================================================================
-  // LOOP CLOSURE STATE VARIABLES
-  //===============================================================================
-
-  /// Historical keyframe poses for loop closure (timestamp -> pose)
-  std::map<double, std::shared_ptr<ov_type::PoseJPL>> _keyframes_LOOP;
-
-  /// Active loop closure constraints
-  std::vector<LoopConstraint> _loop_constraints;
-
-  /// Keyframe information for loop detection
-  std::map<double, KeyframeInfo> _keyframe_info;
-
-  /// Maximum number of keyframes to maintain for loop closure
-  int _max_loop_keyframes = 500;
-
-  /**
-   * @brief Add keyframe for loop closure
-   * @param timestamp Keyframe timestamp
-   * @param pose_clone Pose clone to store
-   * @param keyframe_info Associated keyframe information
-   */
-  void addLoopKeyframe(double timestamp, std::shared_ptr<ov_type::PoseJPL> pose_clone, const KeyframeInfo& keyframe_info);
-
-  /**
-   * @brief Remove old keyframes to maintain memory limits
-   */
-  void cleanupOldKeyframes();
-
-  /**
-   * @brief Get keyframe pose by timestamp
-   * @param timestamp Keyframe timestamp
-   * @return Pointer to pose or nullptr if not found
-   */
-  std::shared_ptr<ov_type::PoseJPL> getLoopKeyframePose(double timestamp);
-
-  /**
-   * @brief Add loop closure constraint
-   * @param constraint Loop constraint to add
-   */
-  void addLoopConstraint(const LoopConstraint& constraint);
-
-  /**
-   * @brief Get all active loop constraints
-   * @return Vector of loop constraints
-   */
-  const std::vector<LoopConstraint>& getLoopConstraints() const { return _loop_constraints; }
-
-  /**
-   * @brief Clear processed loop constraints
-   * @param constraint_ids Vector of constraint IDs to remove
-   */
-  void removeLoopConstraints(const std::vector<int>& constraint_ids);
 
 private:
   // Define that the state helper is a friend class of this class

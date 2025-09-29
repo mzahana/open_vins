@@ -26,6 +26,7 @@
 #include "feat/FeatureInitializer.h"
 #include "types/LandmarkRepresentation.h"
 #include "utils/print.h"
+#include "utils/quat_ops.h"
 
 #include "init/InertialInitializer.h"
 
@@ -36,6 +37,10 @@
 using namespace ov_core;
 using namespace ov_type;
 using namespace ov_msckf;
+
+// Eigen typedefs for convenience
+using Matrix6d = Eigen::Matrix<double, 6, 6>;
+using Vector6d = Eigen::Matrix<double, 6, 1>;
 
 void VioManager::initialize_with_gt(Eigen::Matrix<double, 17, 1> imustate) {
 
@@ -458,4 +463,194 @@ std::vector<Eigen::Vector3d> VioManager::get_features_ARUCO() {
     }
   }
   return aruco_feats;
+}
+
+void VioManager::apply_loop_constraint(const std::shared_ptr<ov_loop_closure::msg::LoopConstraint> &constraint) {
+
+  // Check if we have the constraint data
+  if (constraint == nullptr) {
+    PRINT_WARNING("Loop constraint is null, skipping\n");
+    return;
+  }
+
+  // Extract timestamps and relative pose information
+  double timestamp1 = constraint->timestamp1.sec + constraint->timestamp1.nanosec * 1e-9;
+  double timestamp2 = constraint->timestamp2.sec + constraint->timestamp2.nanosec * 1e-9;
+
+  PRINT_INFO("[LOOP_CONSTRAINT] Processing constraint between t1=%.3f and t2=%.3f (confidence=%.3f)\n",
+             timestamp1, timestamp2, constraint->confidence_score);
+
+  // Early validation checks
+  if (constraint->confidence_score < 0.3) {
+    PRINT_WARNING("[LOOP_CONSTRAINT] Low confidence score %.3f, skipping\n", constraint->confidence_score);
+    return;
+  }
+
+  // Extract relative pose (6DOF transformation) from loop constraint
+  auto &relative_pose = constraint->relative_pose.pose;
+  Eigen::Vector3d rel_position(
+      relative_pose.position.x,
+      relative_pose.position.y,
+      relative_pose.position.z
+  );
+
+  // Convert ROS quaternion to OpenVINS JPL quaternion format [qx, qy, qz, qw]
+  Eigen::Vector4d rel_quat_jpl;
+  rel_quat_jpl(0) = relative_pose.orientation.x;
+  rel_quat_jpl(1) = relative_pose.orientation.y;
+  rel_quat_jpl(2) = relative_pose.orientation.z;
+  rel_quat_jpl(3) = relative_pose.orientation.w;
+
+  // Normalize quaternion and convert to rotation matrix
+  rel_quat_jpl = rel_quat_jpl / rel_quat_jpl.norm();
+  Eigen::Matrix3d R_constraint = quat_2_Rot(rel_quat_jpl);
+
+  // Extract covariance from the constraint message
+  Matrix6d constraint_covariance = Matrix6d::Zero();
+  for (int i = 0; i < 6; i++) {
+    for (int j = 0; j < 6; j++) {
+      constraint_covariance(i, j) = constraint->relative_pose.covariance[6*i + j];
+    }
+  }
+
+  // Find the two poses in our state history closest to the timestamps
+  std::shared_ptr<ov_type::PoseJPL> clone1 = nullptr;
+  std::shared_ptr<ov_type::PoseJPL> clone2 = nullptr;
+  double closest_time1 = INFINITY, closest_time2 = INFINITY;
+
+  // Lock the state to safely access the clone poses
+  std::lock_guard<std::mutex> lock(state->_mutex_state);
+
+  // Find closest pose to timestamp1
+  for (const auto &clone_pair : state->_clones_IMU) {
+    double time_diff = std::abs(clone_pair.first - timestamp1);
+    if (time_diff < closest_time1 && time_diff < 0.05) { // Within 50ms tolerance
+      closest_time1 = time_diff;
+      clone1 = clone_pair.second;
+    }
+  }
+
+  // Find closest pose to timestamp2
+  for (const auto &clone_pair : state->_clones_IMU) {
+    double time_diff = std::abs(clone_pair.first - timestamp2);
+    if (time_diff < closest_time2 && time_diff < 0.05) { // Within 50ms tolerance
+      closest_time2 = time_diff;
+      clone2 = clone_pair.second;
+    }
+  }
+
+  if (clone1 == nullptr || clone2 == nullptr) {
+    PRINT_WARNING("[LOOP_CONSTRAINT] Could not find matching poses in sliding window (errors: %.3f, %.3f)\n",
+                  closest_time1, closest_time2);
+    return;
+  }
+
+  PRINT_DEBUG("[LOOP_CONSTRAINT] Found poses with time errors: %.3f, %.3f ms\n",
+              closest_time1*1000.0, closest_time2*1000.0);
+
+  // Get the current pose estimates from our state
+  Eigen::Matrix3d R_GtoI1 = clone1->Rot();
+  Eigen::Vector3d p_I1inG = clone1->pos();
+  Eigen::Matrix3d R_GtoI2 = clone2->Rot();
+  Eigen::Vector3d p_I2inG = clone2->pos();
+
+  // Transform from IMU frame to camera frame using calibration
+  // Assuming first camera (cam_id = 0) for loop constraints
+  size_t cam_id = 0;
+  if (state->_calib_IMUtoCAM.find(cam_id) == state->_calib_IMUtoCAM.end()) {
+    PRINT_WARNING("[LOOP_CONSTRAINT] Camera calibration not found for cam_id %zu\n", cam_id);
+    return;
+  }
+
+  Eigen::Matrix3d R_ItoC = state->_calib_IMUtoCAM.at(cam_id)->Rot();
+  Eigen::Vector3d p_IinC = state->_calib_IMUtoCAM.at(cam_id)->pos();
+
+  // Compute the estimated relative transformation in camera frame
+  // T_C1toC2_estimated = T_ItoCcam * T_I1toI2 * T_CcamtoI
+  Eigen::Matrix3d R_I1toI2_est = R_GtoI2 * R_GtoI1.transpose();
+  Eigen::Vector3d p_I2inI1_est = R_GtoI1 * (p_I2inG - p_I1inG);
+
+  // Transform to camera frames
+  Eigen::Matrix3d R_C1toC2_est = R_ItoC * R_I1toI2_est * R_ItoC.transpose();
+  Eigen::Vector3d p_C2inC1_est = R_ItoC * (R_I1toI2_est * (R_ItoC.transpose() * (-p_IinC)) + p_I2inI1_est + p_IinC);
+
+  // Compute the residual in SE(3) space
+  // r = log(T_constraint^(-1) * T_estimated)
+  Eigen::Matrix3d R_error = R_constraint.transpose() * R_C1toC2_est;
+  Eigen::Vector3d p_error = R_constraint.transpose() * (p_C2inC1_est - rel_position);
+
+  // Convert rotation error to axis-angle representation
+  Eigen::Vector3d rot_error = log_so3(R_error);
+
+  // Construct 6DOF residual vector [translation; rotation]
+  Vector6d residual;
+  residual.head<3>() = p_error;
+  residual.tail<3>() = rot_error;
+
+  PRINT_DEBUG("[LOOP_CONSTRAINT] Residual: pos=[%.4f,%.4f,%.4f] rot=[%.4f,%.4f,%.4f]\n",
+              residual(0), residual(1), residual(2), residual(3), residual(4), residual(5));
+
+  // Check constraint consistency with chi-squared test
+  double chi2_threshold = 15.507; // 95% confidence, 6 DOF
+  Matrix6d R_inv = constraint_covariance.inverse();
+  double chi2 = residual.transpose() * R_inv * residual;
+
+  if (chi2 > chi2_threshold) {
+    PRINT_WARNING("[LOOP_CONSTRAINT] Chi-squared test failed: %.3f > %.3f, rejecting constraint\n",
+                  chi2, chi2_threshold);
+    return;
+  }
+
+  PRINT_DEBUG("[LOOP_CONSTRAINT] Chi-squared test passed: %.3f < %.3f\n", chi2, chi2_threshold);
+
+  // Compute Jacobians with respect to the two poses
+  // For pose1: [rotation1, position1] (6DOF)
+  // For pose2: [rotation2, position2] (6DOF)
+  Eigen::Matrix<double, 6, 6> H_pose1 = Eigen::Matrix<double, 6, 6>::Zero();
+  Eigen::Matrix<double, 6, 6> H_pose2 = Eigen::Matrix<double, 6, 6>::Zero();
+
+  // Jacobian for position residual w.r.t. pose1 position
+  H_pose1.block<3, 3>(0, 3) = -R_constraint.transpose() * R_ItoC * R_GtoI1;
+
+  // Jacobian for position residual w.r.t. pose1 rotation (using left perturbation)
+  Eigen::Vector3d temp_pos = R_ItoC * (R_I1toI2_est * (R_ItoC.transpose() * (-p_IinC)) + p_I2inI1_est + p_IinC);
+  H_pose1.block<3, 3>(0, 0) = R_constraint.transpose() * skew_x(temp_pos);
+
+  // Jacobian for position residual w.r.t. pose2 position
+  H_pose2.block<3, 3>(0, 3) = R_constraint.transpose() * R_ItoC * R_GtoI1;
+
+  // Jacobian for position residual w.r.t. pose2 rotation
+  H_pose2.block<3, 3>(0, 0) = Eigen::Matrix3d::Zero(); // pose2 rotation doesn't affect position residual directly
+
+  // Jacobian for rotation residual w.r.t. pose1 rotation
+  Eigen::Matrix3d Jr_inv = Jr_so3(rot_error).inverse();
+  H_pose1.block<3, 3>(3, 0) = -Jr_inv * R_ItoC;
+
+  // Jacobian for rotation residual w.r.t. pose1 position
+  H_pose1.block<3, 3>(3, 3) = Eigen::Matrix3d::Zero();
+
+  // Jacobian for rotation residual w.r.t. pose2 rotation
+  H_pose2.block<3, 3>(3, 0) = Jr_inv * R_ItoC;
+
+  // Jacobian for rotation residual w.r.t. pose2 position
+  H_pose2.block<3, 3>(3, 3) = Eigen::Matrix3d::Zero();
+
+  // Construct full Jacobian matrix for the constraint
+  std::vector<std::shared_ptr<ov_type::Type>> Hx_order;
+  Hx_order.push_back(clone1);
+  Hx_order.push_back(clone2);
+
+  Eigen::MatrixXd H_full(6, 12); // 6 residuals x 12 states (2 poses x 6 DOF each)
+  H_full.block<6, 6>(0, 0) = H_pose1;
+  H_full.block<6, 6>(0, 6) = H_pose2;
+
+  // Apply EKF update using StateHelper
+  PRINT_DEBUG("[LOOP_CONSTRAINT] Applying EKF update...\n");
+
+  try {
+    StateHelper::EKFUpdate(state, Hx_order, H_full, residual, constraint_covariance);
+    PRINT_INFO("[LOOP_CONSTRAINT] Successfully applied loop closure constraint (chi2=%.3f)\n", chi2);
+  } catch (const std::exception& e) {
+    PRINT_WARNING("[LOOP_CONSTRAINT] EKF update failed: %s\n", e.what());
+  }
 }

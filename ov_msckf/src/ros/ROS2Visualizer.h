@@ -44,6 +44,9 @@
 #include <tf2/transform_datatypes.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_broadcaster.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+
+#include "ov_loop_closure/msg/loop_constraint.hpp"
 
 #include <atomic>
 #include <fstream>
@@ -119,6 +122,12 @@ public:
   void callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1, int cam_id0,
                        int cam_id1);
 
+  /// Callback for loop constraint messages
+  void loop_constraint_callback(const ov_loop_closure::msg::LoopConstraint::SharedPtr msg);
+
+  /// Add a loop constraint for visualization
+  void add_loop_constraint(double timestamp1, double timestamp2);
+
 protected:
   /// Publish the current state
   void publish_state();
@@ -134,6 +143,9 @@ protected:
 
   /// Publish loop-closure information of current pose and active track information
   void publish_loopclosure_information();
+
+  /// Publish loop closure constraints for visualization
+  void publish_loop_constraints();
 
   /// Global node handler
   std::shared_ptr<rclcpp::Node> _node;
@@ -153,11 +165,13 @@ protected:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_loop_pose, pub_loop_extrinsic;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud>::SharedPtr pub_loop_point;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr pub_loop_intrinsics;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_loop_constraints;
   std::shared_ptr<tf2_ros::TransformBroadcaster> mTfBr;
 
   // Our subscribers and camera synchronizers
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subs_cam;
+  rclcpp::Subscription<ov_loop_closure::msg::LoopConstraint>::SharedPtr sub_loop_constraint;
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;
   std::vector<std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::Image>>> sync_subs_cam;
@@ -206,6 +220,10 @@ protected:
   // Files and if we should save total state
   bool save_total_state = false;
   std::ofstream of_state_est, of_state_std, of_state_gt;
+
+  // Loop closure constraints for visualization
+  std::mutex loop_constraints_mutex;
+  std::vector<std::pair<double, double>> loop_constraints;  // timestamp pairs
 };
 
 } // namespace ov_msckf

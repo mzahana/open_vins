@@ -90,6 +90,7 @@ int main(int argc, char **argv) {
 #elif ROS_AVAILABLE == 2
   viz = std::make_shared<ROS2Visualizer>(node, sys);
   viz->setup_subscribers(parser);
+
 #endif
 
   // Ensure we read in all parameters required
